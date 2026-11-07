@@ -22,6 +22,7 @@ class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = RegisterSerializer
     permission_classes = [permissions.AllowAny]
+    authentication_classes = []
 
 
 class LoginView(TokenObtainPairView):
@@ -29,6 +30,7 @@ class LoginView(TokenObtainPairView):
 
     serializer_class = LoginSerializer
     permission_classes = [permissions.AllowAny]
+    authentication_classes = []
 
 
 class MeView(generics.RetrieveAPIView):
