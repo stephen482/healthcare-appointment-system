@@ -12,14 +12,19 @@ export default function Login() {
   const [password, setPassword] = useState('')
   const [show, setShow] = useState(false)
   const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
 
-  const submit = (e) => {
+  const submit = async (e) => {
     e.preventDefault()
     if (!identifier.trim() || !password) {
       setError('Please enter your username or email and your password.')
       return
     }
-    const res = login(identifier, password)
+
+    setLoading(true)
+    const res = await login(identifier, password)
+    setLoading(false)
+
     if (!res.ok) {
       setError(res.error)
       return
@@ -76,7 +81,9 @@ export default function Login() {
 
             {error && <div className="au-error" role="alert">⚠ {error}</div>}
 
-            <button type="submit" className="au-submit">Log in</button>
+            <button type="submit" className="au-submit" disabled={loading}>
+              {loading ? 'Logging in...' : 'Log in'}
+            </button>
           </form>
 
           <p className="au-switch">

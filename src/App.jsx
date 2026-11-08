@@ -20,8 +20,13 @@ function ScrollToTop() {
 }
 
 function RequireAuth({ children }) {
-  const { user } = useAuth()
+  const { user, ready } = useAuth()
   const location = useLocation()
+
+  // Wait until the app has checked the saved login before deciding.
+  if (!ready) {
+    return <p style={{ padding: 40, textAlign: 'center' }}>Loading...</p>
+  }
 
   if (!user) {
     return <Navigate to="/login" state={{ from: location.pathname + location.search }} replace />

@@ -1,95 +1,81 @@
-import { createContext, useContext, useState } from 'react'
+import { createContext, useContext, useEffect, useState } from 'react'
+import { api, clearTokens, getAccess, saveTokens } from '../api'
 
 const AuthContext = createContext(null)
-const USERS_KEY = 'medibook_users'
-const SESSION_KEY = 'medibook_user'
-
-/* Temporary local accounts. These are replaced by the Django API (JWT) in Stage 4. */
-
-function readUsers() {
-  try {
-    const v = JSON.parse(localStorage.getItem(USERS_KEY))
-    return Array.isArray(v) ? v : []
-  } catch {
-    return []
-  }
-}
-
-function writeUsers(list) {
-  try {
-    localStorage.setItem(USERS_KEY, JSON.stringify(list))
-  } catch {
-    /* storage unavailable */
-  }
-}
-
-function readSession() {
-  try {
-    return JSON.parse(localStorage.getItem(SESSION_KEY))
-  } catch {
-    return null
-  }
-}
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(readSession)
+  const [user, setUser] = useState(null)
+  // If there is no saved token there is nothing to check, so we are ready at once.
+  const [ready, setReady] = useState(() => !getAccess())
 
-  const startSession = (u) => {
-    const safe = { id: u.id, username: u.username, email: u.email, createdAt: u.createdAt }
-    setUser(safe)
+  // On page load: if a token is saved, ask Django who the user is.
+  useEffect(() => {
+    if (!getAccess()) return undefined
+    let cancelled = false
+
+    api
+      .get('/api/auth/me/')
+      .then((me) => {
+        if (!cancelled) setUser(me)
+      })
+      .catch(() => {
+        /* api.js already clears the tokens if they were rejected */
+      })
+      .finally(() => {
+        if (!cancelled) setReady(true)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // api.js sends this event when the session can no longer be renewed.
+  useEffect(() => {
+    const onLogout = () => setUser(null)
+    window.addEventListener('medibook:logout', onLogout)
+    return () => window.removeEventListener('medibook:logout', onLogout)
+  }, [])
+
+  const login = async (identifier, password) => {
     try {
-      localStorage.setItem(SESSION_KEY, JSON.stringify(safe))
-    } catch {
-      /* ignore */
+      const data = await api.post(
+        '/api/auth/login/',
+        { username: identifier.trim(), password },
+        { auth: false }
+      )
+      saveTokens({ access: data.access, refresh: data.refresh })
+      setUser(data.user)
+      return { ok: true }
+    } catch (err) {
+      return {
+        ok: false,
+        error: err.status === 401 ? 'Incorrect username/email or password.' : err.message,
+      }
     }
-    return safe
   }
 
-  const register = ({ username, email, password }) => {
-    const users = readUsers()
-    const name = username.trim()
-    const mail = email.trim().toLowerCase()
-
-    if (users.some((u) => u.username.toLowerCase() === name.toLowerCase())) {
-      return { ok: false, error: 'That username is already taken.' }
+  const register = async ({ username, email, password }) => {
+    try {
+      await api.post(
+        '/api/auth/register/',
+        { username: username.trim(), email: email.trim(), password },
+        { auth: false }
+      )
+    } catch (err) {
+      return { ok: false, error: err.message }
     }
-    if (users.some((u) => u.email === mail)) {
-      return { ok: false, error: 'An account with this email already exists.' }
-    }
-
-    const newUser = {
-      id: Date.now(),
-      username: name,
-      email: mail,
-      password,
-      createdAt: new Date().toISOString(),
-    }
-    writeUsers([...users, newUser])
-    return { ok: true, user: startSession(newUser) }
-  }
-
-  const login = (identifier, password) => {
-    const key = identifier.trim().toLowerCase()
-    const found = readUsers().find(
-      (u) => u.username.toLowerCase() === key || u.email === key
-    )
-    if (!found || found.password !== password) {
-      return { ok: false, error: 'Incorrect username/email or password.' }
-    }
-    return { ok: true, user: startSession(found) }
+    // Account created: log in straight away.
+    return login(username, password)
   }
 
   const logout = () => {
+    clearTokens()
     setUser(null)
-    try {
-      localStorage.removeItem(SESSION_KEY)
-    } catch {
-      /* ignore */
-    }
   }
 
   return (
-    <AuthContext.Provider value={{ user, register, login, logout }}>
+    <AuthContext.Provider value={{ user, ready, login, register, logout }}>
       {children}
     </AuthContext.Provider>
   )

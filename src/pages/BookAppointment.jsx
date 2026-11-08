@@ -1,7 +1,6 @@
-import { useState, useMemo } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import { doctors, specialties } from '../data/doctors'
-import { useAuth } from '../context/AuthContext'
+import { api } from '../api'
 import '../styles/BookAppointment.css'
 
 const SLOTS = [
@@ -9,47 +8,8 @@ const SLOTS = [
   '14:00', '14:30', '15:00', '15:30', '16:00', '16:30',
 ]
 
-const clinics = [
-  { name: 'HeartCare Center, Suite 402', address: '742 Evergreen Terrace, Medical District' },
-  { name: 'Little Steps Pediatric Clinic', address: '18 Maple Avenue, Family Quarter' },
-  { name: 'ClearSkin Institute, Floor 2', address: '55 Rosewood Street, Medical District' },
-  { name: 'NeuroLife Center, Suite 210', address: '301 Hillcrest Road, Health Park' },
-  { name: 'BrightSmile Dental Studio', address: '9 Orchard Lane, Central Plaza' },
-  { name: 'MoveWell Orthopedic Center', address: '120 Riverside Drive, Sports District' },
-  { name: 'MediBook Family Clinic', address: '64 Union Street, Central Plaza' },
-  { name: "Women's Health Pavilion", address: '27 Lotus Close, Medical District' },
-  { name: 'ClearView Eye Center', address: '88 Vista Road, Health Park' },
-  { name: 'ENT & Hearing Clinic', address: '14 Cedar Court, Medical District' },
-  { name: 'MindWell Psychiatry Practice', address: '73 Calm Street, Garden Quarter' },
-  { name: 'UroCare Specialists', address: '40 Bridge Road, Medical District' },
-  { name: 'HopeBridge Cancer Center', address: '5 Unity Avenue, Health Park' },
-  { name: 'Balance Endocrine Clinic', address: '96 Harmony Way, Central Plaza' },
-]
-
-/* ---------- helpers ---------- */
 const pad = (n) => String(n).padStart(2, '0')
-
-function toISO(d) {
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-}
-
-function getBookings() {
-  try {
-    return JSON.parse(localStorage.getItem('medibook_appointments')) || []
-  } catch {
-    return []
-  }
-}
-
-function saveBooking(booking) {
-  try {
-    const all = getBookings()
-    all.push(booking)
-    localStorage.setItem('medibook_appointments', JSON.stringify(all))
-  } catch {
-    /* storage unavailable, ignore */
-  }
-}
+const toISO = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 
 function formatDate(iso) {
   const [y, m, d] = iso.split('-').map(Number)
@@ -58,52 +18,103 @@ function formatDate(iso) {
   })
 }
 
-function Avatar({ name, img }) {
+// Fictional portrait for each doctor, based on the doctor's id.
+function photoFor(id) {
+  const female = id % 2 === 1
+  const k = Math.floor((id - 1) / 2) % 100
+  return `https://randomuser.me/api/portraits/${female ? 'women' : 'men'}/${k}.jpg`
+}
+
+function Avatar({ id, name }) {
   const [failed, setFailed] = useState(false)
-  const initials = name.replace('Dr. ', '').split(' ').map((w) => w[0]).join('')
+  const initials = name
+    .replace(/^dr\.?\s/i, '')
+    .split(' ')
+    .filter(Boolean)
+    .map((w) => w[0])
+    .slice(0, 2)
+    .join('')
+    .toUpperCase()
 
   if (failed) return <div className="bp-avatar bp-avatar-fallback">{initials}</div>
-  return <img className="bp-avatar" src={img} alt={name} onError={() => setFailed(true)} />
+  return <img className="bp-avatar" src={photoFor(id)} alt={name} onError={() => setFailed(true)} />
 }
 
 export default function BookAppointment() {
-  const { user } = useAuth()
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
 
+  // Doctors from Django
+  const [doctors, setDoctors] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
+  const [attempt, setAttempt] = useState(0)
+
+  // Form
   const today = toISO(new Date())
-  const availableDoctors = useMemo(() => doctors.filter((d) => d.available), [])
-
-  const requestedId = Number(params.get('doctor'))
-  const doctor =
-    availableDoctors.find((d) => d.id === requestedId) || availableDoctors[0]
-
-  const [date, setDate] = useState(today)
+  const [date, setDate] = useState(() => {
+    const now = new Date()
+    if (now.getHours() * 60 + now.getMinutes() >= 16 * 60 + 30) {
+      now.setDate(now.getDate() + 1)
+    }
+    return toISO(now)
+  })
   const [slot, setSlot] = useState('')
   const [reason, setReason] = useState('')
   const [error, setError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
   const [saved, setSaved] = useState(null)
 
-  const rating = (4.5 + ((doctor.id * 3) % 5) / 10).toFixed(1)
-  const reviews = 40 + ((doctor.id * 17) % 160)
-  const clinic = clinics[specialties.indexOf(doctor.specialty)] || clinics[6]
+  useEffect(() => {
+    let cancelled = false
 
-  /* Work out which slots can't be picked */
+    api
+      .get('/api/doctors/', { auth: false })
+      .then((data) => {
+        if (!cancelled) {
+          setDoctors(data)
+          setLoadError('')
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) setLoadError(err.message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [attempt])
+
+  const retry = () => {
+    setLoading(true)
+    setLoadError('')
+    setAttempt((a) => a + 1)
+  }
+
+  const availableDoctors = useMemo(() => doctors.filter((d) => d.is_available), [doctors])
+  const specialties = useMemo(
+    () => [...new Set(availableDoctors.map((d) => d.specialty))].sort(),
+    [availableDoctors]
+  )
+
+  const requestedId = Number(params.get('doctor'))
+  const doctor = availableDoctors.find((d) => d.id === requestedId) || availableDoctors[0]
+  const requestedUnavailable =
+    requestedId && doctors.length > 0 && !availableDoctors.some((d) => d.id === requestedId)
+
+  // Times that have already passed today cannot be picked.
+  // Slots taken by other patients are rejected by the backend with a clear message.
   const slotState = useMemo(() => {
     const now = new Date()
     const nowTime = `${pad(now.getHours())}:${pad(now.getMinutes())}`
-    const day = Number(date.split('-')[2]) || 1
-    const mine = getBookings()
-
-    return SLOTS.map((time, i) => {
-      const past = date === today && time <= nowTime
-      const demoBusy = (doctor.id * 7 + day + i * 3) % 5 === 0
-      const taken = mine.some(
-        (b) => b.doctorId === doctor.id && b.date === date && b.time === time && b.status !== 'Cancelled'
-      )
-      return { time, disabled: past || demoBusy || taken }
-    })
-  }, [date, doctor.id, today, saved])
+    return SLOTS.map((time) => ({
+      time,
+      disabled: date === today && time <= nowTime,
+    }))
+  }, [date, today])
 
   const freeCount = slotState.filter((s) => !s.disabled).length
 
@@ -119,7 +130,7 @@ export default function BookAppointment() {
     setError('')
   }
 
-  const handleConfirm = (e) => {
+  const handleConfirm = async (e) => {
     e.preventDefault()
 
     if (!date || date < today) {
@@ -131,25 +142,29 @@ export default function BookAppointment() {
       return
     }
 
-    const booking = {
-      id: Date.now(),
-      doctorId: doctor.id,
-      doctorName: doctor.name,
-      specialty: doctor.specialty,
-      title: doctor.title,
-      img: doctor.img,
-      clinic: clinic.name,
-      address: clinic.address,
-      date,
-      time: slot,
-      reason: reason.trim(),
-      status: 'Upcoming',
-      patient: user ? user.username : 'Guest',
-    }
+    setSubmitting(true)
+    setError('')
 
-    saveBooking(booking)
-    setSaved(booking)
-    window.scrollTo({ top: 0, behavior: 'smooth' })
+    try {
+      const booking = await api.post('/api/appointments/', {
+        doctor: doctor.id,
+        appointment_date: date,
+        appointment_time: slot,
+        reason: reason.trim(),
+      })
+      setSaved(booking)
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    } catch (err) {
+      const slotTaken = err.data && (err.data.appointment_time || err.data.non_field_errors)
+      if (slotTaken) {
+        setError('That time is already booked for this doctor. Please choose another time.')
+        setSlot('')
+      } else {
+        setError(err.message)
+      }
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   const bookAnother = () => {
@@ -159,26 +174,68 @@ export default function BookAppointment() {
     setError('')
   }
 
-  /* ---------- Success screen ---------- */
+  // ---------- Loading and error screens ----------
+
+  if (loading) {
+    return (
+      <div className="bp-page">
+        <div className="bp-success">
+          <h1>Loading doctors...</h1>
+          <p>Please wait a moment.</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (loadError) {
+    return (
+      <div className="bp-page">
+        <div className="bp-success">
+          <h1>We couldn&apos;t load the doctors</h1>
+          <p>{loadError}</p>
+          <div className="bp-success-actions">
+            <button className="bp-btn bp-btn-primary" onClick={retry}>Try again</button>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  if (!doctor) {
+    return (
+      <div className="bp-page">
+        <div className="bp-success">
+          <h1>No doctors available</h1>
+          <p>No doctor is accepting appointments right now. Please check back later.</p>
+          <div className="bp-success-actions">
+            <Link to="/doctors" className="bp-btn bp-btn-primary">See all doctors</Link>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // ---------- Success screen (the booking Django returned) ----------
+
   if (saved) {
     return (
       <div className="bp-page">
         <div className="bp-success">
           <div className="bp-success-icon">✓</div>
           <h1>Appointment confirmed!</h1>
-          <p>Your visit has been booked. A summary is below.</p>
+          <p>Your visit has been saved. A summary is below.</p>
 
           <div className="bp-summary">
             <div className="bp-summary-doc">
-              <Avatar name={saved.doctorName} img={saved.img} />
+              <Avatar id={saved.doctor} name={saved.doctor_name} />
               <div>
-                <strong>{saved.doctorName}</strong>
-                <span>{saved.title}</span>
+                <strong>{saved.doctor_name}</strong>
+                <span>{saved.doctor_specialty}</span>
               </div>
             </div>
-            <div className="bp-summary-row"><span>Date</span><strong>{formatDate(saved.date)}</strong></div>
-            <div className="bp-summary-row"><span>Time</span><strong>{saved.time}</strong></div>
-            <div className="bp-summary-row"><span>Location</span><strong>{saved.clinic}</strong></div>
+            <div className="bp-summary-row"><span>Date</span><strong>{formatDate(saved.appointment_date)}</strong></div>
+            <div className="bp-summary-row"><span>Time</span><strong>{saved.appointment_time.slice(0, 5)}</strong></div>
+            <div className="bp-summary-row"><span>Status</span><strong>{saved.status}</strong></div>
             {saved.reason && (
               <div className="bp-summary-row"><span>Reason</span><strong>{saved.reason}</strong></div>
             )}
@@ -193,27 +250,30 @@ export default function BookAppointment() {
     )
   }
 
-  /* ---------- Booking form ---------- */
+  // ---------- Booking form ----------
+
   return (
     <div className="bp-page">
       <header className="bp-header">
         <span className="bp-eyebrow">SCHEDULING</span>
         <h1>Book an Appointment</h1>
         <p>Secure your consultation with our leading specialists in a few simple steps.</p>
+        {requestedUnavailable && (
+          <p className="bp-notice">The doctor you picked is not accepting appointments right now, so we chose another one.</p>
+        )}
       </header>
 
       <div className="bp-grid">
-        {/* LEFT: doctor + location */}
         <aside className="bp-left">
           <div className="bp-doctor">
             <div className="bp-doctor-circle" />
 
             <div className="bp-doctor-top">
-              <Avatar name={doctor.name} img={doctor.img} />
+              <Avatar id={doctor.id} name={doctor.name} />
               <div>
-                <span className="bp-available"><i /> Available Today</span>
+                <span className="bp-available"><i /> Available</span>
                 <h2>{doctor.name}</h2>
-                <span className="bp-role">{doctor.title}</span>
+                <span className="bp-role">{doctor.specialty}</span>
               </div>
             </div>
 
@@ -221,26 +281,17 @@ export default function BookAppointment() {
 
             <div className="bp-stats">
               <div>
-                <span>EXPERIENCE</span>
-                <strong>{doctor.years} Years</strong>
+                <span>SPECIALTY</span>
+                <strong>{doctor.specialty}</strong>
               </div>
               <div>
-                <span>RATING</span>
-                <strong><b className="bp-star">★</b> {rating} <small>({reviews} reviews)</small></strong>
+                <span>STATUS</span>
+                <strong>Accepting bookings</strong>
               </div>
-            </div>
-          </div>
-
-          <div className="bp-location">
-            <div className="bp-pin">📍</div>
-            <div>
-              <strong>{clinic.name}</strong>
-              <span>{clinic.address}</span>
             </div>
           </div>
         </aside>
 
-        {/* RIGHT: form */}
         <form className="bp-form" onSubmit={handleConfirm}>
           <div className="bp-field">
             <label htmlFor="bp-doctor">Choose doctor</label>
@@ -250,17 +301,15 @@ export default function BookAppointment() {
               value={doctor.id}
               onChange={(e) => changeDoctor(e.target.value)}
             >
-              {specialties.map((s) => {
-                const list = availableDoctors.filter((d) => d.specialty === s)
-                if (list.length === 0) return null
-                return (
-                  <optgroup key={s} label={s}>
-                    {list.map((d) => (
+              {specialties.map((s) => (
+                <optgroup key={s} label={s}>
+                  {availableDoctors
+                    .filter((d) => d.specialty === s)
+                    .map((d) => (
                       <option key={d.id} value={d.id}>{d.name}</option>
                     ))}
-                  </optgroup>
-                )
-              })}
+                </optgroup>
+              ))}
             </select>
           </div>
 
@@ -280,7 +329,7 @@ export default function BookAppointment() {
           <div className="bp-field">
             <div className="bp-label-row">
               <label>Select Time Slot</label>
-              <span className="bp-free">{freeCount} slots free</span>
+              <span className="bp-free">{freeCount} slots open</span>
             </div>
             <div className="bp-slots">
               {slotState.map((s) => (
@@ -295,7 +344,7 @@ export default function BookAppointment() {
                 </button>
               ))}
             </div>
-            {freeCount === 0 && <small>No free slots on this day. Please pick another date.</small>}
+            {freeCount === 0 && <small>No times left today. Please pick another date.</small>}
           </div>
 
           <div className="bp-field">
@@ -307,7 +356,7 @@ export default function BookAppointment() {
               className="bp-input bp-textarea"
               rows="4"
               maxLength={300}
-              placeholder="Briefly describe your symptoms or reason for visit..."
+              placeholder="Briefly describe your reason for visit..."
               value={reason}
               onChange={(e) => setReason(e.target.value)}
             />
@@ -317,8 +366,8 @@ export default function BookAppointment() {
           {error && <div className="bp-error" role="alert">⚠ {error}</div>}
 
           <div className="bp-actions">
-            <button type="submit" className="bp-btn bp-btn-primary bp-confirm">
-              ✓ Confirm Booking
+            <button type="submit" className="bp-btn bp-btn-primary bp-confirm" disabled={submitting}>
+              {submitting ? 'Booking...' : '✓ Confirm Booking'}
             </button>
             <button type="button" className="bp-btn bp-btn-ghost" onClick={() => navigate('/doctors')}>
               Cancel

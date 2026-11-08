@@ -5,8 +5,8 @@ import '../styles/Profile.css'
 export default function Profile() {
   const { user } = useAuth()
 
-  const memberSince = user.createdAt
-    ? new Date(user.createdAt).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+  const memberSince = user.date_joined
+    ? new Date(user.date_joined).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
     : 'Recently'
 
   return (

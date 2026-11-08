@@ -1,29 +1,21 @@
-import { useState, useMemo } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
+import { api } from '../api'
 import '../styles/MyAppointments.css'
 
-const KEY = 'medibook_appointments'
 const TABS = ['All', 'Upcoming', 'Past', 'Cancelled']
 
-function loadAppointments() {
-  try {
-    return JSON.parse(localStorage.getItem(KEY)) || []
-  } catch {
-    return []
-  }
+// Django stores booked / cancelled / completed.
+// A booked appointment whose time has passed is shown as "Past".
+function stateOf(a) {
+  if (a.status === 'cancelled') return 'Cancelled'
+  if (a.status === 'completed') return 'Past'
+  const when = new Date(`${a.appointment_date}T${a.appointment_time}`)
+  return when < new Date() ? 'Past' : 'Upcoming'
 }
 
-function saveAppointments(list) {
-  try {
-    localStorage.setItem(KEY, JSON.stringify(list))
-  } catch {
-    /* storage unavailable */
-  }
-}
-
-function getStatus(a) {
-  if (a.status === 'Cancelled') return 'Cancelled'
-  return new Date(`${a.date}T${a.time}`) < new Date() ? 'Past' : 'Upcoming'
+function whenOf(a) {
+  return new Date(`${a.appointment_date}T${a.appointment_time}`)
 }
 
 function dateParts(iso) {
@@ -38,20 +30,70 @@ function dateParts(iso) {
   }
 }
 
-function Avatar({ name, img }) {
-  const [failed, setFailed] = useState(false)
-  const initials = name.replace('Dr. ', '').split(' ').map((w) => w[0]).join('')
+// Fictional portrait for each doctor, based on the doctor's id.
+function photoFor(id) {
+  const female = id % 2 === 1
+  const k = Math.floor((id - 1) / 2) % 100
+  return `https://randomuser.me/api/portraits/${female ? 'women' : 'men'}/${k}.jpg`
+}
 
-  if (failed || !img) return <div className="ma-avatar ma-avatar-fallback">{initials}</div>
-  return <img className="ma-avatar" src={img} alt={name} onError={() => setFailed(true)} />
+function Avatar({ id, name }) {
+  const [failed, setFailed] = useState(false)
+  const initials = name
+    .replace(/^dr\.?\s/i, '')
+    .split(' ')
+    .filter(Boolean)
+    .map((w) => w[0])
+    .slice(0, 2)
+    .join('')
+    .toUpperCase()
+
+  if (failed) return <div className="ma-avatar ma-avatar-fallback">{initials}</div>
+  return <img className="ma-avatar" src={photoFor(id)} alt={name} onError={() => setFailed(true)} />
 }
 
 export default function MyAppointments() {
-  const [list, setList] = useState(loadAppointments)
+  const [all, setAll] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
+  const [attempt, setAttempt] = useState(0)
+
   const [tab, setTab] = useState('All')
   const [toCancel, setToCancel] = useState(null)
+  const [cancelling, setCancelling] = useState(false)
+  const [cancelError, setCancelError] = useState('')
 
-  const items = useMemo(() => list.map((a) => ({ ...a, state: getStatus(a) })), [list])
+  // Load this patient's appointments from Django.
+  useEffect(() => {
+    let cancelled = false
+
+    api
+      .get('/api/appointments/')
+      .then((data) => {
+        if (!cancelled) {
+          setAll(data)
+          setLoadError('')
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) setLoadError(err.message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [attempt])
+
+  const retry = () => {
+    setLoading(true)
+    setLoadError('')
+    setAttempt((a) => a + 1)
+  }
+
+  const items = useMemo(() => all.map((a) => ({ ...a, state: stateOf(a) })), [all])
 
   const counts = useMemo(() => {
     const c = { All: items.length, Upcoming: 0, Past: 0, Cancelled: 0 }
@@ -61,28 +103,63 @@ export default function MyAppointments() {
 
   const visible = useMemo(() => {
     const filtered = tab === 'All' ? items : items.filter((a) => a.state === tab)
-    return [...filtered].sort((a, b) => {
-      const ta = new Date(`${a.date}T${a.time}`)
-      const tb = new Date(`${b.date}T${b.time}`)
-      return tab === 'Upcoming' ? ta - tb : tb - ta
-    })
+    return [...filtered].sort((a, b) =>
+      tab === 'Upcoming' ? whenOf(a) - whenOf(b) : whenOf(b) - whenOf(a)
+    )
   }, [items, tab])
 
   const next = items
     .filter((a) => a.state === 'Upcoming')
-    .sort((a, b) => new Date(`${a.date}T${a.time}`) - new Date(`${b.date}T${b.time}`))[0]
+    .sort((a, b) => whenOf(a) - whenOf(b))[0]
 
-  const update = (updated) => {
-    setList(updated)
-    saveAppointments(updated)
-  }
-
-  const confirmCancel = () => {
-    update(list.map((a) => (a.id === toCancel.id ? { ...a, status: 'Cancelled' } : a)))
+  const closeModal = () => {
     setToCancel(null)
+    setCancelError('')
   }
 
-  const remove = (id) => update(list.filter((a) => a.id !== id))
+  // Cancel through the API, then update the list with what Django returns.
+  const confirmCancel = async () => {
+    setCancelling(true)
+    setCancelError('')
+    try {
+      const updated = await api.patch(`/api/appointments/${toCancel.id}/`, { status: 'cancelled' })
+      setAll((list) => list.map((a) => (a.id === updated.id ? updated : a)))
+      closeModal()
+    } catch (err) {
+      setCancelError(err.message)
+    } finally {
+      setCancelling(false)
+    }
+  }
+
+  // ---------- Loading and error ----------
+
+  if (loading) {
+    return (
+      <div className="ma-page">
+        <div className="ma-empty">
+          <div className="ma-empty-icon">⏳</div>
+          <h3>Loading your appointments...</h3>
+          <p>Please wait a moment.</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (loadError) {
+    return (
+      <div className="ma-page">
+        <div className="ma-empty">
+          <div className="ma-empty-icon">⚠️</div>
+          <h3>We couldn&apos;t load your appointments</h3>
+          <p>{loadError}</p>
+          <button className="ma-btn ma-btn-primary" onClick={retry}>Try again</button>
+        </div>
+      </div>
+    )
+  }
+
+  // ---------- Page ----------
 
   return (
     <div className="ma-page">
@@ -90,7 +167,7 @@ export default function MyAppointments() {
         <div>
           <span className="ma-eyebrow">YOUR VISITS</span>
           <h1>My Appointments</h1>
-          <p>View, manage and rebook your appointments in one place.</p>
+          <p>View and manage your appointments in one place.</p>
         </div>
         <Link to="/book" className="ma-btn ma-btn-primary">+ New Appointment</Link>
       </header>
@@ -102,7 +179,9 @@ export default function MyAppointments() {
         <div className="ma-sum-card ma-sum-next">
           <span>Next visit</span>
           <strong>
-            {next ? `${dateParts(next.date).month} ${dateParts(next.date).day} · ${next.time}` : 'None booked'}
+            {next
+              ? `${dateParts(next.appointment_date).month} ${dateParts(next.appointment_date).day} · ${next.appointment_time.slice(0, 5)}`
+              : 'None booked'}
           </strong>
         </div>
       </div>
@@ -122,7 +201,7 @@ export default function MyAppointments() {
       {visible.length > 0 ? (
         <div className="ma-list">
           {visible.map((a) => {
-            const p = dateParts(a.date)
+            const p = dateParts(a.appointment_date)
             return (
               <article className={'ma-card ma-' + a.state.toLowerCase()} key={a.id}>
                 <div className="ma-date">
@@ -132,10 +211,10 @@ export default function MyAppointments() {
 
                 <div className="ma-main">
                   <div className="ma-doc">
-                    <Avatar name={a.doctorName} img={a.img} />
+                    <Avatar id={a.doctor} name={a.doctor_name} />
                     <div>
-                      <h3>{a.doctorName}</h3>
-                      <span className="ma-role">{a.title || a.specialty}</span>
+                      <h3>{a.doctor_name}</h3>
+                      <span className="ma-role">{a.doctor_specialty}</span>
                     </div>
                     <span className={'ma-status ma-status-' + a.state.toLowerCase()}>
                       <i /> {a.state === 'Past' ? 'Completed' : a.state}
@@ -144,8 +223,8 @@ export default function MyAppointments() {
 
                   <div className="ma-details">
                     <div><span>🗓️</span> {p.full}</div>
-                    <div><span>🕒</span> {a.time}</div>
-                    <div><span>📍</span> {a.clinic}</div>
+                    <div><span>🕒</span> {a.appointment_time.slice(0, 5)}</div>
+                    <div><span>🩺</span> {a.doctor_specialty}</div>
                   </div>
 
                   {a.reason && (
@@ -154,15 +233,9 @@ export default function MyAppointments() {
 
                   <div className="ma-actions">
                     {a.state === 'Upcoming' ? (
-                      <>
-                        <Link to={`/book?doctor=${a.doctorId}`} className="ma-btn ma-btn-ghost">Reschedule</Link>
-                        <button className="ma-btn ma-btn-danger" onClick={() => setToCancel(a)}>Cancel</button>
-                      </>
+                      <button className="ma-btn ma-btn-danger" onClick={() => setToCancel(a)}>Cancel</button>
                     ) : (
-                      <>
-                        <Link to={`/book?doctor=${a.doctorId}`} className="ma-btn ma-btn-primary">Book again</Link>
-                        <button className="ma-btn ma-btn-ghost" onClick={() => remove(a.id)}>Remove</button>
-                      </>
+                      <Link to={`/book?doctor=${a.doctor}`} className="ma-btn ma-btn-primary">Book again</Link>
                     )}
                   </div>
                 </div>
@@ -184,16 +257,22 @@ export default function MyAppointments() {
       )}
 
       {toCancel && (
-        <div className="ma-overlay" onClick={() => setToCancel(null)}>
+        <div className="ma-overlay" onClick={closeModal}>
           <div className="ma-modal" onClick={(e) => e.stopPropagation()}>
             <div className="ma-modal-icon">⚠️</div>
             <h3>Cancel this appointment?</h3>
             <p>
-              {toCancel.doctorName} on {dateParts(toCancel.date).full} at {toCancel.time}.
+              {toCancel.doctor_name} on {dateParts(toCancel.appointment_date).full} at{' '}
+              {toCancel.appointment_time.slice(0, 5)}.
             </p>
+            {cancelError && <p style={{ color: '#b42318' }}>⚠ {cancelError}</p>}
             <div className="ma-modal-actions">
-              <button className="ma-btn ma-btn-ghost" onClick={() => setToCancel(null)}>Keep it</button>
-              <button className="ma-btn ma-btn-danger-solid" onClick={confirmCancel}>Yes, cancel</button>
+              <button className="ma-btn ma-btn-ghost" onClick={closeModal} disabled={cancelling}>
+                Keep it
+              </button>
+              <button className="ma-btn ma-btn-danger-solid" onClick={confirmCancel} disabled={cancelling}>
+                {cancelling ? 'Cancelling...' : 'Yes, cancel'}
+              </button>
             </div>
           </div>
         </div>
